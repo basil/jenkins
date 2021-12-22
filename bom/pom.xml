@@ -177,6 +177,12 @@ THE SOFTWARE.
       </dependency>
 
       <dependency>
+        <groupId>com.infradna.tool</groupId>
+        <artifactId>bridge-method-annotation</artifactId>
+        <version>${bridge-method-injector.version}</version>
+      </dependency>
+
+      <dependency>
         <groupId>org.jenkins-ci</groupId>
         <artifactId>version-number</artifactId>
         <version>1.9</version>
