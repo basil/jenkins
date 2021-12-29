@@ -2,6 +2,7 @@ package hudson.scm;
 
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import edu.umd.cs.findbugs.annotations.NonNull;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import hudson.FilePath;
 import hudson.Launcher;
 import hudson.model.AbstractProject;
@@ -24,12 +25,14 @@ public final class PollingResult implements Serializable {
      * (This comes from either the workspace, or from the remote repository as of the last polling.
      * Can be null.
      */
+    @SuppressFBWarnings(value = "SE_BAD_FIELD", justification = "This object is marked serializable just to be remoting friendly. Jenkins by itself doesn't persist this object.")
     public final @CheckForNull SCMRevisionState baseline;
 
     /**
      * Current state of the remote repository. To be passed to the next invocation of the polling method.
      * Can be null.
      */
+    @SuppressFBWarnings(value = "SE_BAD_FIELD", justification = "This object is marked serializable just to be remoting friendly. Jenkins by itself doesn't persist this object.")
     public final @CheckForNull SCMRevisionState remote;
 
     /**
