@@ -24,6 +24,7 @@
 
 package hudson;
 
+import com.google.common.primitives.Ints;
 import com.thoughtworks.xstream.XStream;
 import com.thoughtworks.xstream.converters.Converter;
 import com.thoughtworks.xstream.converters.DataHolder;
@@ -32,37 +33,30 @@ import com.thoughtworks.xstream.io.HierarchicalStreamDriver;
 import com.thoughtworks.xstream.io.HierarchicalStreamReader;
 import hudson.diagnosis.OldDataMonitor;
 import hudson.model.Descriptor;
-import hudson.util.AtomicFileWriter;
 import hudson.util.XStream2;
-import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.Reader;
 import java.io.Serializable;
+import java.io.StringReader;
 import java.io.StringWriter;
+import java.io.UncheckedIOException;
 import java.io.Writer;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.InvalidPathException;
-import java.util.Collections;
-import java.util.IdentityHashMap;
-import java.util.Map;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import javax.xml.XMLConstants;
-import javax.xml.parsers.ParserConfigurationException;
-import javax.xml.parsers.SAXParserFactory;
+import jenkins.model.Jenkins;
 import org.apache.commons.io.IOUtils;
-import org.xml.sax.Attributes;
-import org.xml.sax.InputSource;
-import org.xml.sax.Locator;
-import org.xml.sax.SAXException;
-import org.xml.sax.ext.Locator2;
-import org.xml.sax.helpers.DefaultHandler;
 
 /**
  * Represents an XML data file that Jenkins uses as a data file.
@@ -122,9 +116,24 @@ import org.xml.sax.helpers.DefaultHandler;
 public final class XmlFile {
     private final XStream xs;
     private final File file;
+    private final Path namespace;
+    private final String table;
+    private final int id;
+    private final int foreignKey;
     private final boolean force;
-    private static final Map<Object, Void> beingWritten = Collections.synchronizedMap(new IdentityHashMap<>());
-    private static final ThreadLocal<File> writing = new ThreadLocal<>();
+
+    public static Connection getConnection(Path namespace) throws SQLException {
+        Path dir = Jenkins.get().getRootDir().toPath();
+        if (namespace != null) {
+            dir = dir.resolve(namespace);
+        }
+        try {
+            Files.createDirectories(dir);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return DriverManager.getConnection("jdbc:sqlite:" + dir.resolve("sqlite.db").toAbsolutePath());
+    }
 
     public XmlFile(File file) {
         this(DEFAULT_XSTREAM, file);
@@ -143,10 +152,48 @@ public final class XmlFile {
     public XmlFile(XStream xs, File file, boolean force) {
         this.xs = xs;
         this.file = file;
+        if (file != null) {
+            Path jenkinsHome = Jenkins.get().getRootDir().toPath();
+            Path relative = jenkinsHome.relativize(file.toPath());
+            if (relative.getName(0).toString().equals("jobs")) {
+                namespace = relative.subpath(0, 2);
+                relative = namespace.relativize(relative);
+                if (relative.getName(0).toString().equals("builds") && Ints.tryParse(relative.getName(1).toString()) != null) {
+                    if (relative.getName(2).toString().equals("workflow") && Ints.tryParse(relative.getName(3).toString().replaceAll(".xml", "")) != null) {
+                        foreignKey = Integer.parseInt(relative.getName(1).toString());
+                        id = Integer.parseInt(relative.getName(3).toString().replaceAll(".xml", ""));
+                        relative = relative.getName(2);
+                    } else {
+                        foreignKey = -1;
+                        id = Integer.parseInt(relative.getName(1).toString());
+                        relative = relative.getName(2);
+                    }
+                } else {
+                    foreignKey = -1;
+                    id = 1;
+                }
+            } else {
+                namespace = null;
+                foreignKey = -1;
+                id = 1;
+            }
+            // TODO sanitize table name against alphanumeric regex
+            String table = relative.toString();
+            if (table.endsWith(".xml")) {
+                table = table.substring(0, table.lastIndexOf('.'));
+            }
+            this.table = table;
+        } else {
+            this.namespace = null;
+            this.table = null;
+            this.id = -1;
+            this.foreignKey = -1;
+        }
         this.force = force;
     }
 
     public File getFile() {
+        LOGGER.log(Level.SEVERE, "You do not want to be doing this, just trust me", new Throwable());
         return file;
     }
 
@@ -159,12 +206,21 @@ public final class XmlFile {
      */
     public Object read() throws IOException {
         if (LOGGER.isLoggable(Level.FINE)) {
-            LOGGER.fine("Reading " + file);
+            LOGGER.fine("Reading " + table);
         }
-        try (InputStream in = new BufferedInputStream(Files.newInputStream(file.toPath()))) {
-            return xs.fromXML(in);
-        } catch (RuntimeException | Error e) {
-            throw new IOException("Unable to read " + file, e);
+        if (!exists()) {
+            throw new NoSuchFileException("Unable to read " + table);
+        }
+        try (Connection connection = getConnection(namespace); PreparedStatement statement = connection.prepareStatement(String.format("SELECT json FROM '%s' WHERE id = ? AND foreign_key = ?", table))) {
+            statement.setInt(1, id);
+            statement.setInt(2, foreignKey);
+            ResultSet result = statement.executeQuery();
+            if (!result.next()) {
+                throw new NoSuchFileException("Unable to read " + table);
+            }
+            return xs.fromXML(result.getString(1));
+        } catch (SQLException e) {
+            throw new IOException("Unable to read " + table, e);
         }
     }
 
@@ -188,38 +244,38 @@ public final class XmlFile {
     }
 
     private Object unmarshal(Object o, boolean nullOut) throws IOException {
-        try (InputStream in = new BufferedInputStream(Files.newInputStream(file.toPath()))) {
-            // TODO: expose XStream the driver from XStream
+        if (!exists()) {
+            throw new NoSuchFileException("Unable to read " + table);
+        }
+        try (Connection connection = getConnection(namespace); PreparedStatement statement = connection.prepareStatement(String.format("SELECT json FROM '%s' WHERE id = ? AND foreign_key = ?", table))) {
+            statement.setInt(1, id);
+            statement.setInt(2, foreignKey);
+            ResultSet result = statement.executeQuery();
+            if (!result.next()) {
+                throw new NoSuchFileException("Unable to read " + table);
+            }
+            StringReader in = new StringReader(result.getString(1));
             if (nullOut) {
                 return ((XStream2) xs).unmarshal(DEFAULT_DRIVER.createReader(in), o, null, true);
             } else {
                 return xs.unmarshal(DEFAULT_DRIVER.createReader(in), o);
             }
-        } catch (RuntimeException | Error e) {
-            throw new IOException("Unable to read " + file, e);
+        } catch (SQLException e) {
+            throw new IOException("Unable to read " + table, e);
         }
     }
 
     public void write(Object o) throws IOException {
         mkdirs();
-        AtomicFileWriter w = force
-                ? new AtomicFileWriter(file)
-                : new AtomicFileWriter(file.toPath(), StandardCharsets.UTF_8, false, false);
-        try {
-            w.write("<?xml version='1.1' encoding='UTF-8'?>\n");
-            beingWritten.put(o, null);
-            writing.set(file);
-            try {
-                xs.toXML(o, w);
-            } finally {
-                beingWritten.remove(o);
-                writing.set(null);
-            }
-            w.commit();
-        } catch (RuntimeException e) {
+        String value = xs.toXML(o);
+        try (Connection connection = getConnection(namespace); PreparedStatement statement = connection.prepareStatement(String.format("INSERT INTO '%s' (id, foreign_key, json) VALUES (?, ?, ?) ON CONFLICT(id, foreign_key) DO UPDATE SET json = ?", table))) {
+            statement.setInt(1, id);
+            statement.setInt(2, foreignKey);
+            statement.setString(3, value);
+            statement.setString(4, value);
+            statement.executeUpdate();
+        } catch (SQLException e) {
             throw new IOException(e);
-        } finally {
-            w.abort();
         }
     }
 
@@ -235,30 +291,51 @@ public final class XmlFile {
      * @since 2.74
      */
     public static Object replaceIfNotAtTopLevel(Object o, Supplier<Object> replacement) {
-        File currentlyWriting = writing.get();
-        if (beingWritten.containsKey(o) || currentlyWriting == null) {
-            return o;
-        } else {
-            LOGGER.log(Level.WARNING, "JENKINS-45892: reference to " + o + " being saved from unexpected " + currentlyWriting, new IllegalStateException());
-            return replacement.get();
-        }
+        return o;
     }
 
     public boolean exists() {
-        return file.exists();
+        try (Connection connection = getConnection(namespace)) {
+            try (PreparedStatement statement = connection.prepareStatement("SELECT COUNT(name) FROM sqlite_master WHERE type = ? AND name = ?")) {
+                statement.setString(1, "table");
+                statement.setString(2, table);
+                ResultSet result = statement.executeQuery();
+                if (result.getInt(1) == 0) {
+                    return false;
+                }
+            }
+            try (PreparedStatement statement = connection.prepareStatement(String.format("SELECT COUNT(*) FROM '%s' WHERE id = ? AND foreign_key = ?", table))) {
+                statement.setInt(1, id);
+                statement.setInt(2, foreignKey);
+                ResultSet result = statement.executeQuery();
+                return result.getInt(1) > 0;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     public void delete() throws IOException {
-        Files.deleteIfExists(Util.fileToPath(file));
+        try (Connection connection = getConnection(namespace); PreparedStatement statement = connection.prepareStatement(String.format("DELETE FROM '%s' WHERE ID = ? AND foreign_key = ?", table))) {
+            statement.setInt(1, id);
+            statement.setInt(2, foreignKey);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IOException(e);
+        }
     }
 
     public void mkdirs() throws IOException {
-        Util.createDirectories(Util.fileToPath(file.getParentFile()));
+        try (Connection connection = getConnection(namespace); Statement statement = connection.createStatement()) {
+            statement.executeUpdate(String.format("CREATE TABLE IF NOT EXISTS '%s' (id INTEGER NOT NULL, foreign_key INTEGER NOT NULL, json STRING NOT NULL, PRIMARY KEY (id, foreign_key))", table));
+        } catch (SQLException e) {
+            throw new IOException(e);
+        }
     }
 
     @Override
     public String toString() {
-        return file.toString();
+        return table;
     }
 
     /**
@@ -269,18 +346,19 @@ public final class XmlFile {
      * @throws IOException Encoding issues
      */
     public Reader readRaw() throws IOException {
-        try {
-            InputStream fileInputStream = Files.newInputStream(file.toPath());
-            try {
-                return new InputStreamReader(fileInputStream, sniffEncoding());
-            } catch (IOException ex) {
-                // Exception may happen if we fail to find encoding or if this encoding is unsupported.
-                // In such case we close the underlying stream and rethrow.
-                Util.closeAndLogFailures(fileInputStream, LOGGER, "FileInputStream", file.toString());
-                throw ex;
+        if (!exists()) {
+            throw new NoSuchFileException("Unable to read " + table);
+        }
+        try (Connection connection = getConnection(namespace); PreparedStatement statement = connection.prepareStatement(String.format("SELECT json FROM '%s' WHERE id = ? AND foreign_key = ?", table))) {
+            statement.setInt(1, id);
+            statement.setInt(2, foreignKey);
+            ResultSet result = statement.executeQuery();
+            if (!result.next()) {
+                throw new NoSuchFileException("Unable to read " + table);
             }
-        } catch (InvalidPathException e) {
-            throw new IOException(e);
+            return new StringReader(result.getString(1));
+        } catch (SQLException e) {
+            throw new IOException("Unable to read " + table, e);
         }
     }
 
@@ -312,65 +390,7 @@ public final class XmlFile {
      *      if failed to detect encoding.
      */
     public String sniffEncoding() throws IOException {
-        class Eureka extends SAXException {
-            final String encoding;
-
-            Eureka(String encoding) {
-                this.encoding = encoding;
-            }
-        }
-
-        try (InputStream in = Files.newInputStream(file.toPath())) {
-            InputSource input = new InputSource(file.toURI().toASCIIString());
-            input.setByteStream(in);
-            SAXParserFactory spf = SAXParserFactory.newInstance();
-            spf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-            spf.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-            spf.setNamespaceAware(true);
-            spf.newSAXParser().parse(input, new DefaultHandler() {
-                private Locator loc;
-                @Override
-                public void setDocumentLocator(Locator locator) {
-                    this.loc = locator;
-                }
-
-                @Override
-                public void startDocument() throws SAXException {
-                    attempt();
-                }
-
-                @Override
-                public void startElement(String uri, String localName, String qName, Attributes attributes) throws SAXException {
-                    attempt();
-                    // if we still haven't found it at the first start element, then we are not going to find it.
-                    throw new Eureka(null);
-                }
-
-                private void attempt() throws Eureka {
-                    if (loc == null)   return;
-                    if (loc instanceof Locator2) {
-                        Locator2 loc2 = (Locator2) loc;
-                        String e = loc2.getEncoding();
-                        if (e != null)
-                            throw new Eureka(e);
-                    }
-                }
-            });
-            // can't reach here
-            throw new AssertionError();
-        } catch (Eureka e) {
-            if (e.encoding != null)
-                return e.encoding;
-            // the environment can contain old version of Xerces and others that do not support Locator2
-            // in such a case, assume UTF-8 rather than fail, since Jenkins internally always write XML in UTF-8
-            return "UTF-8";
-        } catch (SAXException e) {
-            throw new IOException("Failed to detect encoding of " + file, e);
-        } catch (InvalidPathException e) {
-            throw new IOException(e);
-        } catch (ParserConfigurationException e) {
-            throw new AssertionError(e);    // impossible
-        }
+        throw new UnsupportedOperationException();
     }
 
     /**

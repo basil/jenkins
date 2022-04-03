@@ -46,7 +46,7 @@ import com.thoughtworks.xstream.io.HierarchicalStreamDriver;
 import com.thoughtworks.xstream.io.HierarchicalStreamReader;
 import com.thoughtworks.xstream.io.HierarchicalStreamWriter;
 import com.thoughtworks.xstream.io.ReaderWrapper;
-import com.thoughtworks.xstream.io.xml.KXml2Driver;
+import com.thoughtworks.xstream.io.json.JettisonMappedXmlDriver;
 import com.thoughtworks.xstream.mapper.CannotResolveClassException;
 import com.thoughtworks.xstream.mapper.Mapper;
 import com.thoughtworks.xstream.mapper.MapperWrapper;
@@ -123,7 +123,7 @@ public class XStream2 extends XStream {
      * @return a new instance of the HierarchicalStreamDriver we want to use
      */
     public static HierarchicalStreamDriver getDefaultDriver() {
-        return new KXml2Driver();
+        return new JettisonMappedXmlDriver();
     }
 
     public XStream2() {
@@ -264,6 +264,7 @@ public class XStream2 extends XStream {
     }
 
     private void init() {
+        this.setMode(XStream.NO_REFERENCES);
         int updateLimit = SystemProperties.getInteger(COLLECTION_UPDATE_LIMIT_PROPERTY_NAME, COLLECTION_UPDATE_LIMIT_DEFAULT_VALUE);
         this.setCollectionUpdateLimit(updateLimit);
 

@@ -585,7 +585,7 @@ public class Jenkins extends AbstractCIBase implements DirectlyModifiableTopLeve
     /**
      * {@link View}s.
      */
-    private final CopyOnWriteArrayList<View> views = new CopyOnWriteArrayList<>();
+    private final transient CopyOnWriteArrayList<View> views = new CopyOnWriteArrayList<>();
 
     /**
      * Name of the primary view.

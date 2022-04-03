@@ -153,7 +153,7 @@ public abstract class View extends AbstractModelObject implements AccessControll
      * Container of this view. Set right after the construction
      * and never change thereafter.
      */
-    protected /*final*/ ViewGroup owner;
+    protected transient /*final*/ ViewGroup owner;
 
     /**
      * Name of this view.

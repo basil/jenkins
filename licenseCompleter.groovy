@@ -40,6 +40,11 @@ complete {
     }
 */
 
+    match("org.codehaus.jettison:jettison") {
+        // see https://github.com/jettison-json/jettison/blob/master/LICENSE
+        rewriteLicense([], apacheLicense)
+    }
+
     match("org.jenkins-ci.dom4j:dom4j") {
         rewriteLicense([],license("BSD License","http://dom4j.sourceforge.net/dom4j-1.6.1/license.html"))
     }

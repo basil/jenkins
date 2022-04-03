@@ -29,6 +29,7 @@ import static jenkins.model.lazy.AbstractLazyLoadRunMap.Direction.ASC;
 import static jenkins.model.lazy.AbstractLazyLoadRunMap.Direction.DESC;
 
 import hudson.Util;
+import hudson.XmlFile;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -226,7 +227,7 @@ public final class RunMap<R extends Run<?, R>> extends AbstractLazyLoadRunMap<R>
 
     @Override
     protected R retrieve(File d) throws IOException {
-        if (new File(d, "build.xml").exists()) {
+        if (new XmlFile(new File(d, "build.xml")).exists()) {
             // if the build result file isn't in the directory, ignore it.
             try {
                 R b = cons.create(d);
