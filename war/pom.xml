@@ -706,6 +706,7 @@ THE SOFTWARE.
                 <configuration>
                   <arguments>lint</arguments>
                   <skip>${skipTests}</skip>
+                  <testFailureIgnore>false</testFailureIgnore>
                 </configuration>
               </execution>
             </executions>
