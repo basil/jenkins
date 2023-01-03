@@ -43,6 +43,7 @@ import java.net.Socket;
 import java.net.SocketAddress;
 import java.net.URL;
 import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.security.interfaces.RSAPublicKey;
 import java.util.Arrays;
@@ -80,8 +81,11 @@ import org.kohsuke.accmod.restrictions.NoExternalUse;
 @StaplerAccessibleType
 public final class TcpSlaveAgentListener extends Thread {
 
-    private final ServerSocketChannel serverSocket;
+    private ServerSocketChannel serverSocket;
+
     private volatile boolean shuttingDown;
+
+    private volatile boolean restarting;
 
     public final int configuredPort;
 
@@ -91,17 +95,23 @@ public final class TcpSlaveAgentListener extends Thread {
      */
     public TcpSlaveAgentListener(int port) throws IOException {
         super("TCP agent listener port=" + port);
-        try {
-            serverSocket = ServerSocketChannel.open();
-            serverSocket.socket().bind(new InetSocketAddress(port));
-        } catch (BindException e) {
-            throw (BindException) new BindException("Failed to listen on port " + port + " because it's already in use.").initCause(e);
-        }
+        this.serverSocket = createSocket(port);
         this.configuredPort = port;
 
         LOGGER.log(Level.FINE, "TCP agent listener started on port {0}", getPort());
 
         start();
+    }
+
+    private static ServerSocketChannel createSocket(int port) throws IOException {
+        ServerSocketChannel result;
+        try {
+            result = ServerSocketChannel.open();
+            result.socket().bind(new InetSocketAddress(port));
+        } catch (BindException e) {
+            throw (BindException) new BindException("Failed to listen on port " + port + " because it's already in use.").initCause(e);
+        }
+        return result;
     }
 
     /**
@@ -169,7 +179,32 @@ public final class TcpSlaveAgentListener extends Thread {
         try {
             // the loop eventually terminates when the socket is closed.
             while (!shuttingDown) {
-                Socket s = serverSocket.accept().socket();
+                if (restarting) {
+                    // If we received a restart request, handle it.
+                    if (serverSocket.isOpen()) {
+                        LOGGER.log(Level.WARNING, "Ignoring restart request before server socket is still open");
+                    } else {
+                        serverSocket = createSocket(configuredPort);
+                        LOGGER.log(Level.INFO, "TCP agent listener restarted on port {0}", getPort());
+                    }
+                    restarting = false;
+                }
+                SocketChannel c;
+                try {
+                    c = serverSocket.accept();
+                } catch (IOException e) {
+                    if (restarting) {
+                        /*
+                         * Another thread has requested a restart but failed to politely send a ping
+                         * request and therefore closed the server socket. Message received.
+                         */
+                        continue;
+                    } else {
+                        throw e;
+                    }
+                }
+
+                Socket s = c.socket();
 
                 // this prevents a connection from silently terminated by the router in between or the other peer
                 // and that goes without unnoticed. However, the time out is often very long (for example 2 hours
@@ -178,12 +213,69 @@ public final class TcpSlaveAgentListener extends Thread {
                 // we take care of buffering on our own
                 s.setTcpNoDelay(true);
 
-                new ConnectionHandler(s).start();
+                Thread h = new ConnectionHandler(s);
+                h.start();
+
+                if (restarting) {
+                    /*
+                     * Another thread has requested a restart by politely sending a ping request.
+                     * Acknowledge it.
+                     */
+                    try {
+                        h.join(1000); // pong should be quick
+                    } catch (InterruptedException e) {
+                        LOGGER.log(Level.WARNING, "Failed to acknowledge restart request", e);
+                    }
+
+                    /*
+                     * The server socket is still open at this point, so close it before looping
+                     * around and handling the restart request.
+                     */
+                    try {
+                        serverSocket.close();
+                    } catch (IOException e) {
+                        LOGGER.log(Level.WARNING, "Failed to close down TCP port", e);
+                    }
+                }
             }
         } catch (Throwable e) {
             if (!shuttingDown) {
                 LOGGER.log(Level.SEVERE, "Failed to accept TCP connections", e);
             }
+        }
+    }
+
+    /**
+     * Request a restart of the listener.
+     */
+    private synchronized void restart() {
+        if (restarting) {
+            return;
+        }
+        restarting = true;
+        // First try to wake up the acceptor loop with a polite ping.
+        try {
+            SocketAddress localAddress = serverSocket.getLocalAddress();
+            if (localAddress instanceof InetSocketAddress) {
+                InetSocketAddress address = (InetSocketAddress) localAddress;
+                Socket client = new Socket(address.getHostName(), address.getPort());
+                client.setSoTimeout(1000); // waking the acceptor loop should be quick
+                new PingAgentProtocol().connect(client);
+                return;
+            }
+        } catch (IOException e) {
+            LOGGER.log(Level.FINE, "Failed to send Ping to wake acceptor loop", e);
+        }
+        /*
+         * Next try to wake up the acceptor loop by closing the socket. Per the documentation for
+         * ServerSocket#close, "any thread currently blocked in accept() will throw a
+         * SocketException."
+         */
+        try {
+            serverSocket.close();
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "Failed to close down TCP port", e);
+            restarting = false;
         }
     }
 
@@ -283,6 +375,9 @@ public final class TcpSlaveAgentListener extends Thread {
                     s.close();
                 } catch (IOException ex) {
                     // try to clean up the socket
+                }
+                if (RESTART_ON_FAILURE && !(e instanceof EOFException)) {
+                    restart();
                 }
             }
         }
@@ -437,4 +532,12 @@ public final class TcpSlaveAgentListener extends Thread {
     @SuppressFBWarnings(value = "MS_SHOULD_BE_FINAL", justification = "Accessible via System Groovy Scripts")
     @Restricted(NoExternalUse.class)
     public static Integer CLI_PORT = SystemProperties.getInteger(TcpSlaveAgentListener.class.getName() + ".port");
+
+    /**
+     * Whether to restart the listener if a handler encounters an unanticipated failure.
+     *
+     * @since TODO
+     */
+    @SuppressFBWarnings(value = "MS_SHOULD_BE_FINAL", justification = "Accessible via System Groovy Scripts")
+    public static boolean RESTART_ON_FAILURE = SystemProperties.getBoolean(TcpSlaveAgentListener.class.getName() + ".restartOnFailure");
 }
