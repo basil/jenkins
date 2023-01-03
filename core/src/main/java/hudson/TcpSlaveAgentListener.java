@@ -45,6 +45,8 @@ import java.net.URL;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.security.interfaces.RSAPublicKey;
 import java.util.Arrays;
 import java.util.Base64;
@@ -349,6 +351,9 @@ public final class TcpSlaveAgentListener extends Thread {
                     if (p != null) {
                         if (Jenkins.get().getAgentProtocols().contains(protocol)) {
                             LOGGER.log(p instanceof PingAgentProtocol ? Level.FINE : Level.INFO, () -> "Accepted " + protocol + " connection " + connectionInfo);
+                            if (Files.isRegularFile(Paths.get("/tmp/boom"))) {
+                                throw new UnsupportedOperationException("boom");
+                            }
                             p.handle(this.s);
                         } else {
                             error("Disabled protocol:" + s, this.s);
