@@ -180,7 +180,7 @@ public final class TcpSlaveAgentListener extends Thread {
 
                 new ConnectionHandler(s).start();
             }
-        } catch (IOException e) {
+        } catch (Throwable e) {
             if (!shuttingDown) {
                 LOGGER.log(Level.SEVERE, "Failed to accept TCP connections", e);
             }
@@ -273,7 +273,7 @@ public final class TcpSlaveAgentListener extends Thread {
                 } catch (IOException ex) {
                     // try to clean up the socket
                 }
-            } catch (IOException e) {
+            } catch (Throwable e) {
                 if (e instanceof EOFException) {
                     LOGGER.log(Level.INFO, () -> "Connection " + connectionInfo + " failed: " + e.getMessage());
                 } else {
